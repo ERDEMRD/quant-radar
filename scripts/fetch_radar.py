@@ -458,6 +458,84 @@ def summary_snippet(text, max_sentences=2):
     return " ".join(sentences[:max_sentences])
 
 
+def translate_to_turkish(text):
+    """Ücretsiz Google Translate public endpoint'i (translate.googleapis.com) — AI token maliyeti yok,
+    sadece makine çevirisi. Uzun metinleri ~1500 karakterlik parçalara bölüp çevirir."""
+    if not text:
+        return ""
+    chunks, current, current_len = [], [], 0
+    for word in text.split(" "):
+        if current_len + len(word) + 1 > 1500:
+            chunks.append(" ".join(current))
+            current, current_len = [word], len(word)
+        else:
+            current.append(word)
+            current_len += len(word) + 1
+    if current:
+        chunks.append(" ".join(current))
+
+    translated = []
+    for chunk in chunks:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q={urllib.parse.quote(chunk)}"
+        try:
+            raw = http_get(url, timeout=15)
+            data = json.loads(raw)
+            translated.append("".join(seg[0] for seg in data[0]))
+        except Exception as e:
+            print(f"[translate] hata: {e}", file=sys.stderr)
+            translated.append(chunk)  # çeviri başarısızsa orijinal İngilizce kalsın, boş kalmasın
+    return " ".join(translated)
+
+
+_AMAC_KW = ["amac", "amaç", "problem", "meydan okuma", "zorluk", "hedef", "karşı karşıya",
+            "yetersiz kalmaktadır", "bu çalışmada", "bu makalede", "inceliyoruz", "araştırıyoruz"]
+_YONTEM_KW = ["öneriyoruz", "sunuyoruz", "tasarla", "yöntem", "model", "deney", "değerlendir",
+              "çerçeve", "yapı", "veri seti", "kullanarak", "algoritma", "yaklaşım", "geliştiriyoruz"]
+_BULGU_KW = ["göster", "sonuç", "bulgu", "elde et", "kanıt", "iyileştir", "başarı", "oranında",
+             "artış", "sağlamaktadır", "bulduk", "ortaya koy", "azaltmaktadır"]
+
+
+def structured_turkish_summary(turkish_text):
+    """Çevrilmiş Türkçe metni kural-tabanlı olarak Amaç / Yöntem / Bulgular'a ayırır
+    (LLM değil — basit anahtar-kelime sınıflandırması, eski agent'ın verdiği yapıya benzer okunabilirlik için)."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", turkish_text.strip()) if s.strip()]
+    if not sentences:
+        return ""
+    amac, yontem, bulgu = [], [], []
+    total = len(sentences)
+    for idx, s in enumerate(sentences):
+        sl = s.lower()
+        if any(k in sl for k in _AMAC_KW):
+            amac.append(s)
+        elif any(k in sl for k in _YONTEM_KW):
+            yontem.append(s)
+        elif any(k in sl for k in _BULGU_KW):
+            bulgu.append(s)
+        else:
+            pos = idx / total
+            (amac if pos < 0.35 else yontem if pos < 0.7 else bulgu).append(s)
+
+    parts = []
+    if amac:
+        parts.append("**Amaç:** " + " ".join(amac[:2]))
+    if yontem:
+        parts.append("**Yöntem:** " + " ".join(yontem[:2]))
+    if bulgu:
+        parts.append("**Bulgular:** " + " ".join(bulgu[:2]))
+    return " ".join(parts) if parts else turkish_text
+
+
+def _md_bold_to_html(text):
+    """'**X:**' -> '<strong>X:</strong>', geri kalan metni escape ederek — tr_summary'yi HTML'de göstermek için."""
+    out, last = [], 0
+    for m in re.finditer(r"\*\*(.+?)\*\*", text):
+        out.append(_html_escape(text[last:m.start()]))
+        out.append(f"<strong>{_html_escape(m.group(1))}</strong>")
+        last = m.end()
+    out.append(_html_escape(text[last:]))
+    return "".join(out)
+
+
 def render_paper_card(item):
     p, code, score, t = item["paper"], item["code"], item["score"], item["tier"]
     affiliations = item.get("affiliations") or []
@@ -467,7 +545,7 @@ def render_paper_card(item):
         star_str = f"⭐ {code['stars']}, as-of {datetime.date.today()}" if code.get("stars") else "yıldız [KAYNAK YOK]"
         kod_str = f"{code['url']} ({star_str})"
     tur = "Paper+Resmi Kod" if (code and code.get("official")) else ("Paper+3.Taraf Kod" if code else "Sadece Paper")
-    ozet = summary_snippet(p["summary"])
+    ozet = item.get("tr_summary") or summary_snippet(p["summary"])
     kurum_satiri = f"**Kurumsal sinyal:** {', '.join(affiliations)}\n" if affiliations else ""
     guncelleme_etiketi = " *(v-güncelleme — daha önce raporlanmış paper'ın yeni versiyonu)*" if p.get("is_update") else ""
     pnl_satiri = (
@@ -628,7 +706,7 @@ def _paper_card_html(item):
     affiliations = item.get("affiliations") or []
     pnl_flag = item.get("pnl_flag", False)
     tur = "Paper+Resmi Kod" if (code and code.get("official")) else ("Paper+3.Taraf Kod" if code else "Sadece Paper")
-    ozet = _html_escape(summary_snippet(p["summary"]))
+    ozet = _md_bold_to_html(item["tr_summary"]) if item.get("tr_summary") else _html_escape(summary_snippet(p["summary"]))
     guncelleme = (
         ' <span style="font-size:11px;color:#B5651D;font-style:italic;">(v-güncelleme)</span>'
         if p.get("is_update") else ""
@@ -836,7 +914,14 @@ def main():
                 "paper": p, "code": code, "score": score, "tier": t,
                 "affiliations": affiliations, "pnl_flag": has_pnl_claim(p["summary"] + " " + fulltext),
             }
-            item["card"] = render_paper_card(item) if t in ("S", "A") else None
+            if t in ("S", "A"):
+                # Sadece tam kart alacak (S/A) paper'lar için çeviri yap — B/C zaten kısa/tek satır,
+                # gereksiz çeviri isteğiyle taramayı yavaşlatmayalım.
+                tr_raw = translate_to_turkish(p["summary"])
+                item["tr_summary"] = structured_turkish_summary(tr_raw)
+                item["card"] = render_paper_card(item)
+            else:
+                item["card"] = None
             papers_scored.append(item)
         except Exception as e:
             print(f"[paper] '{p.get('title', '?')}' işlenirken hata, atlanıyor: {e}", file=sys.stderr)
