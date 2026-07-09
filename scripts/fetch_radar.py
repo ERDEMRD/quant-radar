@@ -127,19 +127,33 @@ def _parse_arxiv_entries(root, ns, cat):
     return out
 
 
+def _fetch_arxiv_feed(cat, sort_by, max_results):
+    """arXiv Atom feed'ini çek + parse et. Ağ/format hatalarında ASLA exception fırlatmaz — boş liste döner.
+    arXiv API'si art arda hızlı isteklerde bozuk/HTML hata sayfası dönebiliyor; bu yüzden
+    hem http_get hem de ET.fromstring ayrı ayrı korunuyor."""
+    url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
+           f"&sortBy={sort_by}&sortOrder=descending&max_results={max_results}")
+    try:
+        raw = http_get(url, timeout=25)
+    except Exception as e:
+        print(f"[arXiv] {cat} ({sort_by}) istek hatası: {e}", file=sys.stderr)
+        return []
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as e:
+        print(f"[arXiv] {cat} ({sort_by}) XML parse hatası (muhtemelen arXiv geçici hata sayfası döndü): {e}", file=sys.stderr)
+        return []
+    try:
+        return _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
+    except Exception as e:
+        print(f"[arXiv] {cat} ({sort_by}) entry parse hatası: {e}", file=sys.stderr)
+        return []
+
+
 def fetch_arxiv_category(cat, target_date, max_results=150):
     """Dün İLK KEZ gönderilen paper'lar (yeni)."""
-    url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
-           f"&sortBy=submittedDate&sortOrder=descending&max_results={max_results}")
-    try:
-        raw = http_get(url)
-    except Exception as e:
-        print(f"[arXiv] {cat} (yeni) hata: {e}", file=sys.stderr)
-        return []
-    root = ET.fromstring(raw)
-    entries = _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
     out = []
-    for e in entries:
+    for e in _fetch_arxiv_feed(cat, "submittedDate", max_results):
         if e["pub_date"] != target_date:
             continue
         e["is_update"] = False
@@ -150,17 +164,8 @@ def fetch_arxiv_category(cat, target_date, max_results=150):
 
 def fetch_arxiv_updates(cat, target_date, max_results=150):
     """Dün REVİZE edilmiş (v2/v3...) ama daha önce başka bir günde ilk gönderilmiş paper'lar."""
-    url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
-           f"&sortBy=lastUpdatedDate&sortOrder=descending&max_results={max_results}")
-    try:
-        raw = http_get(url)
-    except Exception as e:
-        print(f"[arXiv] {cat} (güncelleme) hata: {e}", file=sys.stderr)
-        return []
-    root = ET.fromstring(raw)
-    entries = _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
     out = []
-    for e in entries:
+    for e in _fetch_arxiv_feed(cat, "lastUpdatedDate", max_results):
         if e["upd_date"] != target_date:
             continue
         if e["pub_date"] == target_date:
@@ -172,22 +177,33 @@ def fetch_arxiv_updates(cat, target_date, max_results=150):
 
 
 def fetch_all_arxiv(target_date):
-    """Hem yeni gönderilen hem de dün revize edilen (v2/v3) paper'ları döner."""
+    """Hem yeni gönderilen hem de dün revize edilen (v2/v3) paper'ları döner.
+    Bir kategori/kaynak patlarsa diğerleri etkilenmez — her çağrı kendi içinde korumalı."""
     papers, seen_base_ids = [], set()
     for cat in ARXIV_CATEGORIES:
-        for p in fetch_arxiv_category(cat, target_date):
+        try:
+            found = fetch_arxiv_category(cat, target_date)
+        except Exception as e:
+            print(f"[arXiv] {cat} (yeni) beklenmeyen hata, atlanıyor: {e}", file=sys.stderr)
+            found = []
+        for p in found:
             if p["base_id"] in seen_base_ids:
                 continue
             seen_base_ids.add(p["base_id"])
             papers.append(p)
-        time.sleep(1)  # arXiv nezaket aralığı
+        time.sleep(3)  # arXiv nezaket aralığı (resmi öneri: istekler arası >=3sn)
     for cat in ARXIV_CATEGORIES:
-        for p in fetch_arxiv_updates(cat, target_date):
+        try:
+            found = fetch_arxiv_updates(cat, target_date)
+        except Exception as e:
+            print(f"[arXiv] {cat} (güncelleme) beklenmeyen hata, atlanıyor: {e}", file=sys.stderr)
+            found = []
+        for p in found:
             if p["base_id"] in seen_base_ids:
                 continue
             seen_base_ids.add(p["base_id"])
             papers.append(p)
-        time.sleep(1)
+        time.sleep(3)
     return papers
 
 
@@ -471,7 +487,7 @@ def render_repo_card(repo, score, t, has_paper_ref=False, has_pnl=False, has_bac
     )
 
 
-def build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy):
+def build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy, errors=None):
     all_items = papers_scored + repos_scored
     all_items.sort(key=lambda x: x["score"], reverse=True)
 
@@ -539,6 +555,12 @@ def build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_
     if not (hn or reddit_q or reddit_algo or quantocracy):
         lines.append("Topluluk kaynaklarından bugün [KAYNAK YOK] — çekilemedi veya boş döndü.\n")
 
+    if errors:
+        lines.append("## ⚠️ Kaynak hataları\n")
+        for err in errors:
+            lines.append(f"- [KAYNAK YOK] {err}")
+        lines.append("")
+
     lines.append(
         "---\n*Bu digest kod-tabanlı otomatik taramanın çıktısıdır; yatırım tavsiyesi değildir, "
         "işlem önerisi içermez. Raporlanan tüm sayılar iddia olarak sunulmuştur, doğrulama gerektirir.*"
@@ -557,31 +579,45 @@ def main():
 
     print(f"Quant Radar taraması başlıyor — hedef tarih: {target_date}")
 
+    errors = []  # digest sonunda "çekince" olarak listelenecek kaynak hataları
     recent_urls = load_recent_urls()
 
-    papers = fetch_all_arxiv(target_date)
+    try:
+        papers = fetch_all_arxiv(target_date)
+    except Exception as e:
+        print(f"[arXiv] tüm kategori taraması beklenmeyen hatayla durdu: {e}", file=sys.stderr)
+        errors.append(f"arXiv taraması tamamlanamadı: {e}")
+        papers = []
     print(f"  arXiv: {len(papers)} paper bulundu")
 
     papers_scored = []
     for p in papers:
-        # Daha önce raporlanmış (aynı base arXiv id) ve bu kez de "yeni" değilse atla.
-        # is_update=True olanlar (v2/v3 revizyonu) bilinçli olarak tekrar girer, kart üzerinde etiketlenir.
-        if not p.get("is_update") and (p["url"] in recent_urls or p["base_id"] in recent_urls):
-            continue
-        code = find_code_for_paper(p)
-        fulltext = fetch_arxiv_fulltext(p["url"])
-        affiliations = detect_institutions(p["title"] + " " + p["summary"] + " " + " ".join(p["authors"]) + " " + fulltext)
-        score = score_paper(p, code, affiliations=affiliations, extra_text=fulltext)
-        t = tier_of(score)
-        item = {
-            "paper": p, "code": code, "score": score, "tier": t,
-            "affiliations": affiliations, "pnl_flag": has_pnl_claim(p["summary"] + " " + fulltext),
-        }
-        item["card"] = render_paper_card(item) if t in ("S", "A") else None
-        papers_scored.append(item)
+        try:
+            # Daha önce raporlanmış (aynı base arXiv id) ve bu kez de "yeni" değilse atla.
+            # is_update=True olanlar (v2/v3 revizyonu) bilinçli olarak tekrar girer, kart üzerinde etiketlenir.
+            if not p.get("is_update") and (p["url"] in recent_urls or p["base_id"] in recent_urls):
+                continue
+            code = find_code_for_paper(p)
+            fulltext = fetch_arxiv_fulltext(p["url"])
+            affiliations = detect_institutions(p["title"] + " " + p["summary"] + " " + " ".join(p["authors"]) + " " + fulltext)
+            score = score_paper(p, code, affiliations=affiliations, extra_text=fulltext)
+            t = tier_of(score)
+            item = {
+                "paper": p, "code": code, "score": score, "tier": t,
+                "affiliations": affiliations, "pnl_flag": has_pnl_claim(p["summary"] + " " + fulltext),
+            }
+            item["card"] = render_paper_card(item) if t in ("S", "A") else None
+            papers_scored.append(item)
+        except Exception as e:
+            print(f"[paper] '{p.get('title', '?')}' işlenirken hata, atlanıyor: {e}", file=sys.stderr)
         time.sleep(0.5)
 
-    repos = fetch_new_repos(target_date)
+    try:
+        repos = fetch_new_repos(target_date)
+    except Exception as e:
+        print(f"[GitHub] repo taraması beklenmeyen hatayla durdu: {e}", file=sys.stderr)
+        errors.append(f"GitHub repo taraması tamamlanamadı: {e}")
+        repos = []
     print(f"  GitHub: {len(repos)} yeni/hareketli repo bulundu (bağımsız tarama — paper eşleşmesiyle sınırlı değil)")
 
     # Yıldıza göre sırala; README derinlemesine taramasını en umut vaat eden N repoya uygula (API bütçesi için).
@@ -590,31 +626,54 @@ def main():
 
     repos_scored = []
     for idx, r in enumerate(repos):
-        if r["html_url"] in recent_urls:
-            continue
-        readme_text = ""
-        if idx < README_SCAN_LIMIT:
-            readme_text = fetch_repo_readme(r["full_name"])
-            time.sleep(0.3)
-        score, has_paper_ref, has_pnl, has_backtest, affiliations = score_repo_only(r, readme_text)
-        t = tier_of(score)
-        item = {
-            "repo": r, "score": score, "tier": t,
-            "has_paper_ref": has_paper_ref, "has_pnl": has_pnl,
-            "has_backtest": has_backtest, "affiliations": affiliations,
-        }
-        item["card"] = (
-            render_repo_card(r, score, t, has_paper_ref, has_pnl, has_backtest, affiliations)
-            if t in ("S", "A") else None
-        )
-        repos_scored.append(item)
+        try:
+            if r["html_url"] in recent_urls:
+                continue
+            readme_text = ""
+            if idx < README_SCAN_LIMIT:
+                readme_text = fetch_repo_readme(r["full_name"])
+                time.sleep(0.3)
+            score, has_paper_ref, has_pnl, has_backtest, affiliations = score_repo_only(r, readme_text)
+            t = tier_of(score)
+            item = {
+                "repo": r, "score": score, "tier": t,
+                "has_paper_ref": has_paper_ref, "has_pnl": has_pnl,
+                "has_backtest": has_backtest, "affiliations": affiliations,
+            }
+            item["card"] = (
+                render_repo_card(r, score, t, has_paper_ref, has_pnl, has_backtest, affiliations)
+                if t in ("S", "A") else None
+            )
+            repos_scored.append(item)
+        except Exception as e:
+            print(f"[repo] '{r.get('full_name', '?')}' işlenirken hata, atlanıyor: {e}", file=sys.stderr)
 
-    hn = fetch_hn(target_date)
-    reddit_q = fetch_reddit("quant", target_date)
-    reddit_algo = fetch_reddit("algotrading", target_date)
-    quantocracy = fetch_quantocracy()
+    try:
+        hn = fetch_hn(target_date)
+    except Exception as e:
+        print(f"[HN] beklenmeyen hata: {e}", file=sys.stderr)
+        errors.append(f"HN taraması tamamlanamadı: {e}")
+        hn = []
+    try:
+        reddit_q = fetch_reddit("quant", target_date)
+    except Exception as e:
+        print(f"[Reddit r/quant] beklenmeyen hata: {e}", file=sys.stderr)
+        errors.append(f"Reddit r/quant taraması tamamlanamadı: {e}")
+        reddit_q = []
+    try:
+        reddit_algo = fetch_reddit("algotrading", target_date)
+    except Exception as e:
+        print(f"[Reddit r/algotrading] beklenmeyen hata: {e}", file=sys.stderr)
+        errors.append(f"Reddit r/algotrading taraması tamamlanamadı: {e}")
+        reddit_algo = []
+    try:
+        quantocracy = fetch_quantocracy()
+    except Exception as e:
+        print(f"[Quantocracy] beklenmeyen hata: {e}", file=sys.stderr)
+        errors.append(f"Quantocracy taraması tamamlanamadı: {e}")
+        quantocracy = []
 
-    digest = build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy)
+    digest = build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy, errors)
 
     os.makedirs(DIGESTS_DIR, exist_ok=True)
     out_path = os.path.join(DIGESTS_DIR, f"radar-{target_date}.md")
