@@ -52,15 +52,18 @@ jobs:
                      line-height:1.55;color:#1a1a1a">{html}</div>"""
 
           date = os.path.basename(path).replace("radar-", "").replace(".md", "")
-          msg = MIMEMultipart("alternative")
-          msg["Subject"] = f"🔭 Quant Radar — {date}"
-          msg["From"] = user
-          msg["To"] = ", ".join(to_list)
-          msg.attach(MIMEText(md, "plain", "utf-8"))
-          msg.attach(MIMEText(html, "html", "utf-8"))
 
+          # Her alıcıya AYRI mail — To alanında sadece kendi adresi görünür,
+          # diğer alıcılar gösterilmez (tek tek bağımsız SMTP gönderimi).
           with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
               s.login(user, pw)
-              s.sendmail(user, to_list, msg.as_string())
-          print("Mail gönderildi:", to_list)
+              for recipient in to_list:
+                  msg = MIMEMultipart("alternative")
+                  msg["Subject"] = f"🔭 Quant Radar — {date}"
+                  msg["From"] = user
+                  msg["To"] = recipient
+                  msg.attach(MIMEText(md, "plain", "utf-8"))
+                  msg.attach(MIMEText(html, "html", "utf-8"))
+                  s.sendmail(user, [recipient], msg.as_string())
+                  print("Mail gönderildi:", recipient)
           PY

@@ -31,13 +31,49 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 UA = {"User-Agent": "quant-radar-bot/1.0 (+https://github.com/ERDEMRD/quant-radar)"}
 
 ARXIV_CATEGORIES = ["q-fin.TR", "q-fin.PM", "q-fin.ST", "q-fin.CP", "q-fin.RM", "q-fin.MF"]
-QUANT_REPO_QUERIES = ["quant trading", "trading strategy", "backtest", "alpha factor", "market making OR orderbook"]
+
+# GitHub taraması artık paper eşleştirmesiyle sınırlı değil — kendi başına geniş bir sorgu seti.
+QUANT_REPO_QUERIES = [
+    "quant trading", "trading strategy", "backtest", "alpha factor",
+    "market making OR orderbook", "statistical arbitrage", "mean reversion strategy",
+    "pairs trading", "options pricing model", "portfolio optimization",
+    "factor investing", "reinforcement learning trading", "crypto trading bot",
+    "high frequency trading", "quantitative research framework",
+]
 
 STOPWORDS = {
     "the", "a", "an", "of", "for", "and", "in", "on", "with", "to", "using",
     "via", "based", "approach", "study", "toward", "towards", "from", "into",
     "under", "over", "new", "novel", "analysis", "model", "models",
 }
+
+# "Büyük yerler" — akademik + kurumsal quant sinyali. Bulunursa öncelik puanı verilir.
+INSTITUTION_MAP = {
+    "mit": "MIT", "massachusetts institute of technology": "MIT",
+    "stanford": "Stanford", "harvard": "Harvard", "princeton": "Princeton",
+    "columbia university": "Columbia", "berkeley": "UC Berkeley",
+    "caltech": "Caltech", "california institute of technology": "Caltech",
+    "university of chicago": "U Chicago", "yale": "Yale", "cornell": "Cornell",
+    "imperial college": "Imperial College London", "oxford": "Oxford",
+    "cambridge": "Cambridge", "eth zurich": "ETH Zurich", "carnegie mellon": "CMU",
+    "google deepmind": "Google DeepMind", "deepmind": "DeepMind", "openai": "OpenAI",
+    "anthropic": "Anthropic", "meta ai": "Meta AI", "microsoft research": "Microsoft Research",
+    "citadel": "Citadel", "two sigma": "Two Sigma", "renaissance technologies": "Renaissance Technologies",
+    "d. e. shaw": "D.E. Shaw", "de shaw": "D.E. Shaw", "jane street": "Jane Street",
+    "aqr capital": "AQR Capital", "man group": "Man Group", "millennium management": "Millennium",
+    "point72": "Point72", "bridgewater": "Bridgewater", "goldman sachs": "Goldman Sachs",
+    "morgan stanley": "Morgan Stanley", "jpmorgan": "JPMorgan", "j.p. morgan": "JPMorgan",
+    "susquehanna": "Susquehanna (SIG)", "optiver": "Optiver", "imc trading": "IMC Trading",
+    "hudson river trading": "Hudson River Trading", "akuna capital": "Akuna Capital",
+    "winton": "Winton", "balyasny": "Balyasny",
+}
+
+# Somut performans iddiası (Sharpe/PnL/getiri) sinyali — sıralamada öne çıkarmak için.
+PNL_PATTERNS = [
+    r"sharpe\s*ratio", r"\bsharpe\b", r"\bpnl\b", r"\bp&l\b", r"\bprofit\b",
+    r"cumulative return", r"annualized return", r"backtested? return",
+    r"\d+(\.\d+)?\s*%\s*(return|profit|gain|drawdown)",
+]
 
 
 # --------------------------------------------------------------------------
@@ -115,6 +151,46 @@ def github_search_repos(query, extra="", max_results=10):
     except Exception as e:
         print(f"[GitHub] arama hatasi '{query}': {e}", file=sys.stderr)
         return []
+
+
+def detect_institutions(text):
+    """Metinde (özet, yazar listesi, tam metin) bilinen kurum/fon/lab adı ara."""
+    tl = (text or "").lower()
+    found = set()
+    for kw, name in INSTITUTION_MAP.items():
+        if re.search(r"\b" + re.escape(kw) + r"\b", tl):
+            found.add(name)
+    return sorted(found)
+
+
+def has_pnl_claim(text):
+    tl = (text or "").lower()
+    return any(re.search(p, tl) for p in PNL_PATTERNS)
+
+
+def fetch_arxiv_fulltext(paper_url):
+    """Kurum/affiliation tespiti için paper'ın tam metnine (varsa HTML render) bak.
+    arXiv Atom API affiliation vermiyor; bu yüzden ayrı bir istek gerekiyor."""
+    m = re.search(r"arxiv\.org/abs/([\w.]+)", paper_url or "")
+    if not m:
+        return ""
+    arxiv_id = m.group(1)
+    for url in (f"https://arxiv.org/html/{arxiv_id}", f"https://arxiv.org/abs/{arxiv_id}"):
+        try:
+            return http_get(url, timeout=15)
+        except Exception:
+            continue
+    return ""
+
+
+def fetch_repo_readme(full_name):
+    """Repo README'sini ham metin olarak çek — paper referansı / PnL iddiası / backtest sinyali için."""
+    url = f"https://api.github.com/repos/{full_name}/readme"
+    headers = {**gh_headers(), "Accept": "application/vnd.github.raw"}
+    try:
+        return http_get(url, headers, timeout=15)
+    except Exception:
+        return ""
 
 
 def find_code_for_paper(paper):
@@ -205,13 +281,13 @@ def fetch_quantocracy():
 # --------------------------------------------------------------------------
 # 2 — RADAR skorlama (PROTOCOL.md tablosu)
 # --------------------------------------------------------------------------
-def score_paper(paper, code_info):
+def score_paper(paper, code_info, affiliations=None, extra_text=""):
     score = 0
     if code_info:
         score += 35 if code_info.get("official") else 25
     else:
         score += 15
-    text = (paper["summary"] or "").lower()
+    text = ((paper["summary"] or "") + " " + (extra_text or "")).lower()
     if any(k in text for k in ["out-of-sample", "live trading", "paper trading", "forward test", "walk-forward"]):
         score += 20
     elif any(k in text for k in ["backtest", "in-sample", "historical simulation"]):
@@ -222,17 +298,34 @@ def score_paper(paper, code_info):
         score += 15
     if code_info and code_info.get("stars"):
         score += min(10, code_info["stars"] // 20)
+    if affiliations:
+        score += 8  # MIT/Stanford/Citadel/Two Sigma vb. büyük kurum sinyali — öncelik
+    if has_pnl_claim(text):
+        score += 8  # somut Sharpe/PnL/getiri iddiası — sıralamada öne çıkar
     return min(score, 100)
 
 
-def score_repo_only(repo):
+def score_repo_only(repo, readme_text=""):
     score = 10
     stars = repo.get("stargazers_count", 0)
     if stars > 50:
         score += 10
     if repo.get("_hareketli"):
         score += 5
-    return min(score, 100)
+    rl = (readme_text or "").lower()
+    has_paper_ref = bool(re.search(r"arxiv\.org|doi\.org|\bpaper\b", rl))
+    has_pnl = has_pnl_claim(rl)
+    has_backtest = any(k in rl for k in ["backtest", "walk-forward", "out-of-sample"])
+    if has_paper_ref:
+        score += 25  # README bir paper'a referans veriyor — repo+paper kombinasyonuna yaklaşır
+    if has_pnl:
+        score += 15
+    if has_backtest:
+        score += 10
+    affiliations = detect_institutions(repo.get("description", "") + " " + rl)
+    if affiliations:
+        score += 8
+    return min(score, 100), has_paper_ref, has_pnl, has_backtest, affiliations
 
 
 def tier_of(score):
@@ -272,29 +365,52 @@ def summary_snippet(text, max_sentences=2):
 
 def render_paper_card(item):
     p, code, score, t = item["paper"], item["code"], item["score"], item["tier"]
+    affiliations = item.get("affiliations") or []
+    pnl_flag = item.get("pnl_flag", False)
     kod_str = "Yok"
     if code:
         star_str = f"⭐ {code['stars']}, as-of {datetime.date.today()}" if code.get("stars") else "yıldız [KAYNAK YOK]"
         kod_str = f"{code['url']} ({star_str})"
     tur = "Paper+Resmi Kod" if (code and code.get("official")) else ("Paper+3.Taraf Kod" if code else "Sadece Paper")
     ozet = summary_snippet(p["summary"])
+    kurum_satiri = f"**Kurumsal sinyal:** {', '.join(affiliations)}\n" if affiliations else ""
+    pnl_satiri = (
+        "İddia edilen sonuç: metinde somut Sharpe/PnL/getiri iddiası tespit edildi — "
+        "**doğrulanmamış, kaynağı paper içinde kontrol et.**\n"
+        if pnl_flag else
+        "İddia edilen sonuç: [KAYNAK YOK] (metinde somut performans sayısı bulunamadı).\n"
+    )
     return (
         f"### [Skor {score} · {t}] {p['title']}\n"
         f"**Tür:** {tur} · **Paper:** {p['url']} · **Kod:** {kod_str}\n"
-        f"{ozet} İddia edilen sonuç: [KAYNAK YOK] (özetten otomatik çıkarım yapılmadı, doğrulama gerekir).\n"
-        f"**Neden denemeye değer:** {p['category']} kategorisinde {'kod ile birlikte yayınlanmış' if code else 'kod eşleşmesi bulunamadı'}. "
+        f"{kurum_satiri}"
+        f"{ozet} {pnl_satiri}"
+        f"**Neden denemeye değer:** {p['category']} kategorisinde {'kod ile birlikte yayınlanmış' if code else 'kod eşleşmesi bulunamadı'}"
+        f"{', tanınmış kurum/fon imzası var' if affiliations else ''}. "
         f"**Dikkat:** PnL/Sharpe iddiaları paper içinde doğrulanmalı; bu satır otomatik taramadır.\n"
     )
 
 
-def render_repo_card(repo, score, t):
+def render_repo_card(repo, score, t, has_paper_ref=False, has_pnl=False, has_backtest=False, affiliations=None):
+    affiliations = affiliations or []
+    kurum_satiri = f"**Kurumsal sinyal:** {', '.join(affiliations)}\n" if affiliations else ""
+    sinyaller = []
+    if has_paper_ref:
+        sinyaller.append("README bir paper'a referans veriyor")
+    if has_pnl:
+        sinyaller.append("somut PnL/Sharpe iddiası var")
+    if has_backtest:
+        sinyaller.append("backtest/walk-forward raporu var")
+    sinyal_satiri = f"**README sinyalleri:** {', '.join(sinyaller)} (doğrulanmamış).\n" if sinyaller else ""
     return (
         f"### [Skor {score} · {t}] {repo['full_name']}\n"
         f"**Tür:** Sadece Repo · **Repo:** {repo['html_url']} (⭐ {repo.get('stargazers_count', '[KAYNAK YOK]')}, "
         f"as-of {datetime.date.today()})\n"
+        f"{kurum_satiri}"
         f"{(repo.get('description') or '').strip() or '[KAYNAK YOK açıklama]'}\n"
+        f"{sinyal_satiri}"
         f"**Neden denemeye değer:** {'Yıldız hızı yüksek / hareketli' if repo.get('_hareketli') else 'Yeni açılmış quant repo'}. "
-        f"**Dikkat:** Backtest/PnL kanıtı doğrulanmadı.\n"
+        f"**Dikkat:** Backtest/PnL kanıtı bağımsız doğrulanmadı.\n"
     )
 
 
@@ -310,13 +426,18 @@ def build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_
     n_papers = len(papers_scored)
     n_repos = len(repos_scored)
     n_matched = sum(1 for x in papers_scored if x.get("code"))
+    n_institution = sum(1 for x in all_items if x.get("affiliations"))
+    n_pnl = sum(1 for x in papers_scored if x.get("pnl_flag")) + sum(1 for x in repos_scored if x.get("has_pnl"))
 
     lines = []
     lines.append(f"# Quant Radar — {target_date}\n")
     lines.append(
-        f"Dün ({target_date}, UTC) taranan çıktılar: **{n_papers} paper**, **{n_repos} yeni/hareketli repo**, "
-        f"**{n_matched} paper+kod eşleşmesi**. Bu digest kod-tabanlı deterministik taramayla üretildi "
-        f"(arXiv + GitHub Search API + HN/Reddit/Quantocracy).\n"
+        f"Dün ({target_date}, UTC) taranan çıktılar: **{n_papers} paper**, **{n_repos} yeni/hareketli repo** "
+        f"(GitHub bağımsız da tarandı, sadece paper eşleşmesiyle sınırlı değil), **{n_matched} paper+kod eşleşmesi**, "
+        f"**{n_institution} tanınmış kurum/fon imzalı bulgu**, **{n_pnl} somut PnL/Sharpe iddiası içeren bulgu**. "
+        f"Sıralama skora göre: kod eşleşmesi, büyük kurum/fon imzası (MIT, Stanford, Citadel, Two Sigma vb.) ve "
+        f"somut performans iddiası olan bulgular öne çıkarılır. Bu digest kod-tabanlı deterministik taramayla "
+        f"üretildi (arXiv + GitHub Search API + HN/Reddit/Quantocracy).\n"
     )
 
     if s_tier:
@@ -389,24 +510,44 @@ def main():
         if p["url"] in recent_urls:
             continue
         code = find_code_for_paper(p)
-        score = score_paper(p, code)
+        fulltext = fetch_arxiv_fulltext(p["url"])
+        affiliations = detect_institutions(p["title"] + " " + p["summary"] + " " + " ".join(p["authors"]) + " " + fulltext)
+        score = score_paper(p, code, affiliations=affiliations, extra_text=fulltext)
         t = tier_of(score)
-        item = {"paper": p, "code": code, "score": score, "tier": t}
+        item = {
+            "paper": p, "code": code, "score": score, "tier": t,
+            "affiliations": affiliations, "pnl_flag": has_pnl_claim(p["summary"] + " " + fulltext),
+        }
         item["card"] = render_paper_card(item) if t in ("S", "A") else None
         papers_scored.append(item)
         time.sleep(0.5)
 
     repos = fetch_new_repos(target_date)
-    print(f"  GitHub: {len(repos)} yeni/hareketli repo bulundu")
+    print(f"  GitHub: {len(repos)} yeni/hareketli repo bulundu (bağımsız tarama — paper eşleşmesiyle sınırlı değil)")
+
+    # Yıldıza göre sırala; README derinlemesine taramasını en umut vaat eden N repoya uygula (API bütçesi için).
+    repos.sort(key=lambda r: r.get("stargazers_count", 0), reverse=True)
+    README_SCAN_LIMIT = 25
 
     repos_scored = []
-    for r in repos:
+    for idx, r in enumerate(repos):
         if r["html_url"] in recent_urls:
             continue
-        score = score_repo_only(r)
+        readme_text = ""
+        if idx < README_SCAN_LIMIT:
+            readme_text = fetch_repo_readme(r["full_name"])
+            time.sleep(0.3)
+        score, has_paper_ref, has_pnl, has_backtest, affiliations = score_repo_only(r, readme_text)
         t = tier_of(score)
-        item = {"repo": r, "score": score, "tier": t}
-        item["card"] = render_repo_card(r, score, t) if t in ("S", "A") else None
+        item = {
+            "repo": r, "score": score, "tier": t,
+            "has_paper_ref": has_paper_ref, "has_pnl": has_pnl,
+            "has_backtest": has_backtest, "affiliations": affiliations,
+        }
+        item["card"] = (
+            render_repo_card(r, score, t, has_paper_ref, has_pnl, has_backtest, affiliations)
+            if t in ("S", "A") else None
+        )
         repos_scored.append(item)
 
     hn = fetch_hn(target_date)
