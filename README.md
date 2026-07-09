@@ -11,16 +11,20 @@ vault'una not düşer.
 
 ## Kurulum (bir kez)
 
-1. GitHub'da boş `quant-radar` reposu aç.
+1. GitHub'da boş `quant-radar` reposu aç. ✅ (github.com/ERDEMRD/quant-radar)
 2. Repo Settings → Secrets and variables → Actions, üç secret ekle:
-   - `MAIL_USERNAME` — Gmail adresin
-   - `MAIL_APP_PASSWORD` — Gmail uygulama şifresi
-   - `MAIL_TO` — alıcı adres (boş bırakılabilir, o zaman MAIL_USERNAME'e gider)
+   - `MAIL_USERNAME` — `SENDER_EMAIL_REDACTED`
+   - `MAIL_APP_PASSWORD` — bu adres için üretilen Gmail **uygulama şifresi** (tek kullanımlık/app password;
+     normal Gmail şifresi değil — myaccount.google.com/apppasswords adresinden üretilir)
+   - `MAIL_TO` — `RECIPIENT1_REDACTED,RECIPIENT2_REDACTED` (virgülle ayrılmış, iki alıcıya da gider)
 3. GitHub'dan `repo` yetkili bir Personal Access Token üret ve bu klasördeki
    `config/github_token.txt` dosyasına yapıştır (dosya .gitignore'da, asla push edilmez).
+   Not: Günlük tarama (`radar-scan.yml`) kendi push'u için Actions'ın otomatik verdiği
+   `GITHUB_TOKEN`'ı kullanır — bunun için ayrıca secret eklemen gerekmiyor.
 4. `config/config.json` içindeki `remote` alanına repo adresini yaz.
 5. İlk push'u yap (ya da Cowork'te "quant-radar'ı push et" de).
 
-Zamanlanmış görev her sabah: tarar → skorlar → `digests/radar-YYYY-MM-DD.md` yazar →
-commit+push → Action maili gönderir → top bulgular `PAPERS/papers/Radar/`e Obsidian
-notu olarak düşer.
+Günlük akış: `radar-scan.yml` her sabah 07:00 TR'de `scripts/fetch_radar.py`'yi çalıştırır
+(arXiv + GitHub Search API + HN/Reddit/Quantocracy'yi kod ile deterministik tarar, RADAR
+skoru hesaplar) → `digests/radar-YYYY-MM-DD.md` yazar → commit+push eder → bu push
+`mail-digest.yml`'i tetikler → digest HTML mail olarak iki adrese gider.
