@@ -592,6 +592,213 @@ def build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_
 
 
 # --------------------------------------------------------------------------
+# 3b — HTML bülten render (mail için) — kurumsal görünümlü, kart tabanlı tasarım.
+# mail-digest.yml bu dosyayı bulursa markdown->html çevirisi yerine direkt bunu yollar.
+# --------------------------------------------------------------------------
+_TIER_COLORS = {
+    "S": ("#F5A623", "#3A2A00"),  # amber
+    "A": ("#4A90D9", "#0B1F3A"),  # blue
+    "B": ("#8896A6", "#1A2330"),  # slate gray
+    "C": ("#C9D0D9", "#3A4250"),  # light gray
+}
+
+
+def _html_escape(text):
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _badge_html(tier, score):
+    bg, fg = _TIER_COLORS.get(tier, _TIER_COLORS["C"])
+    return (
+        f'<span style="display:inline-block;background:{bg};color:{fg};font-weight:700;'
+        f'font-size:12px;padding:3px 10px;border-radius:12px;letter-spacing:0.3px;">'
+        f'{tier} · {score}</span>'
+    )
+
+
+def _pill_html(label):
+    return (
+        f'<span style="display:inline-block;background:#EEF1F5;color:#3A4250;font-size:12px;'
+        f'padding:4px 10px;border-radius:10px;margin:0 6px 6px 0;">{label}</span>'
+    )
+
+
+def _paper_card_html(item):
+    p, code, score, t = item["paper"], item["code"], item["score"], item["tier"]
+    affiliations = item.get("affiliations") or []
+    pnl_flag = item.get("pnl_flag", False)
+    tur = "Paper+Resmi Kod" if (code and code.get("official")) else ("Paper+3.Taraf Kod" if code else "Sadece Paper")
+    ozet = _html_escape(summary_snippet(p["summary"]))
+    guncelleme = (
+        ' <span style="font-size:11px;color:#B5651D;font-style:italic;">(v-güncelleme)</span>'
+        if p.get("is_update") else ""
+    )
+    kod_link = ""
+    if code:
+        star_suffix = f" ⭐{code['stars']}" if code.get("stars") else ""
+        kod_link = f' · <a href="{code["url"]}" style="color:#4A90D9;text-decoration:none;">Kod{star_suffix}</a>'
+    kurum_html = (
+        "".join(_pill_html(_html_escape(a)) for a in affiliations)
+        if affiliations else ""
+    )
+    pnl_note = (
+        '<span style="color:#B5651D;">Somut Sharpe/PnL/getiri iddiası tespit edildi — doğrulanmamış.</span>'
+        if pnl_flag else
+        '<span style="color:#8896A6;">[KAYNAK YOK] — metinde somut performans sayısı bulunamadı.</span>'
+    )
+    return f"""
+    <div style="border:1px solid #E2E5EA;border-radius:10px;padding:16px 20px;margin-bottom:14px;background:#FFFFFF;">
+      <div style="margin-bottom:8px;">{_badge_html(t, score)}
+        <span style="font-size:11px;color:#8896A6;margin-left:8px;">{tur}</span></div>
+      <h3 style="margin:0 0 6px;font-size:16px;color:#0B1F3A;font-family:Georgia,serif;">{_html_escape(p['title'])}{guncelleme}</h3>
+      <div style="margin-bottom:8px;">{kurum_html}</div>
+      <p style="font-size:13px;color:#3A4250;line-height:1.6;margin:0 0 8px;">{ozet}</p>
+      <p style="font-size:12px;line-height:1.5;margin:0 0 8px;">{pnl_note}</p>
+      <p style="font-size:12px;margin:0;"><a href="{p['url']}" style="color:#4A90D9;text-decoration:none;">Paper</a>{kod_link}</p>
+    </div>"""
+
+
+def _repo_card_html(item):
+    r, score, t = item["repo"], item["score"], item["tier"]
+    affiliations = item.get("affiliations") or []
+    sinyaller = []
+    if item.get("has_paper_ref"):
+        sinyaller.append("README paper'a referans veriyor")
+    if item.get("has_pnl"):
+        sinyaller.append("somut PnL/Sharpe iddiası var")
+    if item.get("has_backtest"):
+        sinyaller.append("backtest/walk-forward raporu var")
+    sinyal_html = (
+        f'<p style="font-size:12px;color:#B5651D;margin:0 0 8px;">{_html_escape(", ".join(sinyaller))} (doğrulanmamış)</p>'
+        if sinyaller else ""
+    )
+    kurum_html = "".join(_pill_html(_html_escape(a)) for a in affiliations) if affiliations else ""
+    stars = r.get("stargazers_count", "[KAYNAK YOK]")
+    return f"""
+    <div style="border:1px solid #E2E5EA;border-radius:10px;padding:16px 20px;margin-bottom:14px;background:#FFFFFF;">
+      <div style="margin-bottom:8px;">{_badge_html(t, score)}
+        <span style="font-size:11px;color:#8896A6;margin-left:8px;">Sadece Repo · ⭐ {stars}</span></div>
+      <h3 style="margin:0 0 6px;font-size:16px;color:#0B1F3A;font-family:Georgia,serif;">{_html_escape(r['full_name'])}</h3>
+      <div style="margin-bottom:8px;">{kurum_html}</div>
+      <p style="font-size:13px;color:#3A4250;line-height:1.6;margin:0 0 8px;">{_html_escape((r.get('description') or '').strip()) or '[KAYNAK YOK açıklama]'}</p>
+      {sinyal_html}
+      <p style="font-size:12px;margin:0;"><a href="{r['html_url']}" style="color:#4A90D9;text-decoration:none;">GitHub'da aç</a></p>
+    </div>"""
+
+
+def render_digest_html(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy, errors=None):
+    all_items = papers_scored + repos_scored
+    all_items.sort(key=lambda x: x["score"], reverse=True)
+    s_tier = [x for x in all_items if x["tier"] == "S"]
+    a_tier = [x for x in all_items if x["tier"] == "A"]
+    b_tier = [x for x in all_items if x["tier"] == "B"]
+    c_tier = [x for x in all_items if x["tier"] == "C"]
+
+    def card(it):
+        return _paper_card_html(it) if "paper" in it else _repo_card_html(it)
+
+    n_papers = len(papers_scored)
+    n_repos = len(repos_scored)
+    n_matched = sum(1 for x in papers_scored if x.get("code"))
+    n_institution = sum(1 for x in all_items if x.get("affiliations"))
+    n_pnl = sum(1 for x in papers_scored if x.get("pnl_flag")) + sum(1 for x in repos_scored if x.get("has_pnl"))
+
+    section_html = ""
+    if s_tier:
+        section_html += '<h2 style="font-size:15px;color:#0B1F3A;margin:26px 0 12px;font-family:Georgia,serif;">🏆 S-Tier</h2>' + "".join(card(i) for i in s_tier)
+    if a_tier:
+        section_html += '<h2 style="font-size:15px;color:#0B1F3A;margin:26px 0 12px;font-family:Georgia,serif;">A-Tier</h2>' + "".join(card(i) for i in a_tier)
+    if b_tier:
+        section_html += '<h2 style="font-size:15px;color:#0B1F3A;margin:26px 0 12px;font-family:Georgia,serif;">B-Tier</h2>'
+        section_html += "".join(
+            f'<p style="font-size:13px;margin:4px 0;">{_badge_html(i["tier"], i["score"])} '
+            f'<a href="{(i["paper"]["url"] if "paper" in i else i["repo"]["html_url"])}" style="color:#0B1F3A;text-decoration:none;">'
+            f'{_html_escape(i["paper"]["title"] if "paper" in i else i["repo"]["full_name"])}</a></p>'
+            for i in b_tier
+        )
+    if c_tier:
+        section_html += '<h2 style="font-size:15px;color:#0B1F3A;margin:26px 0 12px;font-family:Georgia,serif;">C-Tier / Radar altı</h2>'
+        section_html += "".join(
+            f'<p style="font-size:12px;color:#8896A6;margin:3px 0;">{i["tier"]}·{i["score"]} '
+            f'<a href="{(i["paper"]["url"] if "paper" in i else i["repo"]["html_url"])}" style="color:#8896A6;text-decoration:none;">'
+            f'{_html_escape(i["paper"]["title"] if "paper" in i else i["repo"]["full_name"])}</a></p>'
+            for i in c_tier
+        )
+
+    community_html = ""
+    if hn:
+        community_html += '<p style="font-size:12px;font-weight:700;color:#0B1F3A;margin:10px 0 4px;">Hacker News</p>'
+        community_html += "".join(
+            f'<p style="font-size:12px;margin:2px 0;color:#3A4250;">({h["points"]} pts) '
+            f'<a href="{h["url"]}" style="color:#4A90D9;text-decoration:none;">{_html_escape(h["title"])}</a></p>'
+            for h in hn[:8]
+        )
+    if reddit_q or reddit_algo:
+        community_html += '<p style="font-size:12px;font-weight:700;color:#0B1F3A;margin:10px 0 4px;">Reddit r/quant, r/algotrading</p>'
+        community_html += "".join(
+            f'<p style="font-size:12px;margin:2px 0;color:#3A4250;">({r["score"]} pts) '
+            f'<a href="{r["url"]}" style="color:#4A90D9;text-decoration:none;">{_html_escape(r["title"])}</a></p>'
+            for r in (reddit_q + reddit_algo)[:10]
+        )
+    if quantocracy:
+        community_html += '<p style="font-size:12px;font-weight:700;color:#0B1F3A;margin:10px 0 4px;">Quantocracy</p>'
+        community_html += "".join(
+            f'<p style="font-size:12px;margin:2px 0;color:#3A4250;">'
+            f'<a href="{q["url"]}" style="color:#4A90D9;text-decoration:none;">{_html_escape(q["title"])}</a></p>'
+            for q in quantocracy[:10]
+        )
+    if not community_html:
+        community_html = '<p style="font-size:12px;color:#8896A6;">[KAYNAK YOK] — topluluk kaynakları bugün çekilemedi veya boştu.</p>'
+
+    errors_html = ""
+    if errors:
+        errors_html = (
+            '<div style="background:#FFF7E6;border:1px solid #F5A623;border-radius:8px;padding:14px 18px;margin-top:20px;">'
+            '<p style="font-size:12px;font-weight:700;color:#B5651D;margin:0 0 6px;">⚠️ Kaynak hataları</p>'
+            + "".join(f'<p style="font-size:12px;color:#8A5A1E;margin:2px 0;">[KAYNAK YOK] {_html_escape(e)}</p>' for e in errors)
+            + "</div>"
+        )
+
+    summary_paragraph = (
+        f"Dün ({target_date}, UTC) taranan çıktılar: <strong>{n_papers} paper</strong>, "
+        f"<strong>{n_repos} yeni/hareketli repo</strong>, <strong>{n_matched} paper+kod eşleşmesi</strong>, "
+        f"<strong>{n_institution} tanınmış kurum/fon imzalı bulgu</strong>, "
+        f"<strong>{n_pnl} somut PnL/Sharpe iddiası içeren bulgu</strong>. Sıralama skora göre: kod eşleşmesi, "
+        f"büyük kurum/fon imzası ve somut performans iddiası olan bulgular öne çıkarılır."
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:24px 12px;background:#F4F6F9;font-family:-apple-system,Helvetica,Arial,sans-serif;">
+  <div style="max-width:680px;margin:0 auto;background:#FFFFFF;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(11,31,58,0.08);">
+    <div style="background:#0B1F3A;padding:28px 32px;">
+      <h1 style="color:#FFFFFF;margin:0;font-size:22px;font-family:Georgia,serif;">🔭 Quant Radar</h1>
+      <p style="color:#9FB0C8;margin:6px 0 0;font-size:13px;">{target_date} · Günlük Kod-Tabanlı Tarama</p>
+    </div>
+    <div style="padding:20px 32px;border-bottom:1px solid #E2E5EA;">
+      <p style="font-size:13px;color:#3A4250;line-height:1.6;margin:0;">{summary_paragraph}</p>
+    </div>
+    <div style="padding:24px 32px;">
+      {section_html if section_html else '<p style="font-size:13px;color:#8896A6;">Bugün eşik üstü bulgu yok — tüm sonuçlar arşiv dosyasında (.md) mevcut.</p>'}
+    </div>
+    <div style="padding:20px 32px;background:#F8F9FB;border-top:1px solid #E2E5EA;">
+      <p style="font-size:13px;font-weight:700;color:#0B1F3A;margin:0 0 8px;font-family:Georgia,serif;">📡 Topluluk Nabzı</p>
+      {community_html}
+    </div>
+    {errors_html}
+    <div style="padding:18px 32px;background:#F4F6F9;">
+      <p style="font-size:11px;color:#8896A6;line-height:1.6;margin:0;">
+        Bu digest kod-tabanlı otomatik taramanın çıktısıdır; yatırım tavsiyesi değildir, işlem önerisi içermez.
+        Raporlanan tüm sayılar iddia olarak sunulmuştur, doğrulama gerektirir.
+      </p>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+# --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
 def main():
@@ -697,12 +904,17 @@ def main():
         quantocracy = []
 
     digest = build_digest(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy, errors)
+    digest_html = render_digest_html(target_date, papers_scored, repos_scored, hn, reddit_q, reddit_algo, quantocracy, errors)
 
     os.makedirs(DIGESTS_DIR, exist_ok=True)
     out_path = os.path.join(DIGESTS_DIR, f"radar-{target_date}.md")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(digest)
+    html_path = os.path.join(DIGESTS_DIR, f"radar-{target_date}.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(digest_html)
     print(f"Digest yazıldı: {out_path}")
+    print(f"HTML bülten yazıldı: {html_path}")
 
 
 if __name__ == "__main__":

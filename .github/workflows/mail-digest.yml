@@ -47,9 +47,18 @@ jobs:
           if not md:
               print("Digest boş, gönderilmiyor."); sys.exit(0)
 
-          html = markdown.markdown(md, extensions=["tables", "fenced_code"])
-          html = f"""<div style="font-family:Georgia,serif;max-width:760px;margin:auto;
-                     line-height:1.55;color:#1a1a1a">{html}</div>"""
+          # fetch_radar.py aynı tarih için önceden render edilmiş kurumsal görünümlü
+          # bir .html bülten üretmiş olabilir (scripts/fetch_radar.py::render_digest_html).
+          # Varsa direkt onu kullan — yoksa (eski/agent-tabanlı digest'ler için) markdown'dan
+          # sade bir HTML'e geri dön.
+          html_sibling = path.rsplit(".", 1)[0] + ".html"
+          if os.path.exists(html_sibling):
+              with open(html_sibling, encoding="utf-8") as f:
+                  html = f.read()
+          else:
+              body = markdown.markdown(md, extensions=["tables", "fenced_code"])
+              html = f"""<div style="font-family:Georgia,serif;max-width:760px;margin:auto;
+                         line-height:1.55;color:#1a1a1a">{body}</div>"""
 
           date = os.path.basename(path).replace("radar-", "").replace(".md", "")
 
