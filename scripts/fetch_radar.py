@@ -99,24 +99,21 @@ def gh_headers():
 # --------------------------------------------------------------------------
 # 1a/1b — arXiv taraması + paper-kod eşleştirmesi
 # --------------------------------------------------------------------------
-def fetch_arxiv_category(cat, target_date, max_results=100):
-    url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
-           f"&sortBy=submittedDate&sortOrder=descending&max_results={max_results}")
-    try:
-        raw = http_get(url)
-    except Exception as e:
-        print(f"[arXiv] {cat} hata: {e}", file=sys.stderr)
-        return []
-    ns = {"a": "http://www.w3.org/2005/Atom"}
-    root = ET.fromstring(raw)
+def base_arxiv_id(url_or_id):
+    """'2607.00001v2' -> '2607.00001' — versiyon numarasından bağımsız kimlik (dedup için)."""
+    m = re.search(r"(\d{4}\.\d{4,5})(v\d+)?", url_or_id or "")
+    return m.group(1) if m else (url_or_id or "")
+
+
+def _parse_arxiv_entries(root, ns, cat):
     out = []
     for entry in root.findall("a:entry", ns):
         published = entry.findtext("a:published", default="", namespaces=ns)
+        updated = entry.findtext("a:updated", default="", namespaces=ns)
         try:
             pub_date = datetime.datetime.strptime(published[:10], "%Y-%m-%d").date()
+            upd_date = datetime.datetime.strptime(updated[:10], "%Y-%m-%d").date()
         except ValueError:
-            continue
-        if pub_date != target_date:
             continue
         title = (entry.findtext("a:title", default="", namespaces=ns) or "").strip().replace("\n", " ")
         summary = (entry.findtext("a:summary", default="", namespaces=ns) or "").strip().replace("\n", " ")
@@ -124,21 +121,73 @@ def fetch_arxiv_category(cat, target_date, max_results=100):
         authors = [a.findtext("a:name", default="", namespaces=ns) for a in entry.findall("a:author", ns)]
         out.append({
             "source": "arxiv", "category": cat, "title": title, "summary": summary,
-            "url": link, "authors": authors, "date": str(pub_date),
+            "url": link, "authors": authors, "pub_date": pub_date, "upd_date": upd_date,
+            "base_id": base_arxiv_id(link),
         })
     return out
 
 
+def fetch_arxiv_category(cat, target_date, max_results=150):
+    """Dün İLK KEZ gönderilen paper'lar (yeni)."""
+    url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
+           f"&sortBy=submittedDate&sortOrder=descending&max_results={max_results}")
+    try:
+        raw = http_get(url)
+    except Exception as e:
+        print(f"[arXiv] {cat} (yeni) hata: {e}", file=sys.stderr)
+        return []
+    root = ET.fromstring(raw)
+    entries = _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
+    out = []
+    for e in entries:
+        if e["pub_date"] != target_date:
+            continue
+        e["is_update"] = False
+        e["date"] = str(e["pub_date"])
+        out.append(e)
+    return out
+
+
+def fetch_arxiv_updates(cat, target_date, max_results=150):
+    """Dün REVİZE edilmiş (v2/v3...) ama daha önce başka bir günde ilk gönderilmiş paper'lar."""
+    url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
+           f"&sortBy=lastUpdatedDate&sortOrder=descending&max_results={max_results}")
+    try:
+        raw = http_get(url)
+    except Exception as e:
+        print(f"[arXiv] {cat} (güncelleme) hata: {e}", file=sys.stderr)
+        return []
+    root = ET.fromstring(raw)
+    entries = _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
+    out = []
+    for e in entries:
+        if e["upd_date"] != target_date:
+            continue
+        if e["pub_date"] == target_date:
+            continue  # zaten "yeni" olarak yakalanıyor, tekrar sayma
+        e["is_update"] = True
+        e["date"] = str(e["upd_date"])
+        out.append(e)
+    return out
+
+
 def fetch_all_arxiv(target_date):
-    papers, seen = [], set()
+    """Hem yeni gönderilen hem de dün revize edilen (v2/v3) paper'ları döner."""
+    papers, seen_base_ids = [], set()
     for cat in ARXIV_CATEGORIES:
         for p in fetch_arxiv_category(cat, target_date):
-            key = p["title"].lower().strip()
-            if key in seen:
+            if p["base_id"] in seen_base_ids:
                 continue
-            seen.add(key)
+            seen_base_ids.add(p["base_id"])
             papers.append(p)
         time.sleep(1)  # arXiv nezaket aralığı
+    for cat in ARXIV_CATEGORIES:
+        for p in fetch_arxiv_updates(cat, target_date):
+            if p["base_id"] in seen_base_ids:
+                continue
+            seen_base_ids.add(p["base_id"])
+            papers.append(p)
+        time.sleep(1)
     return papers
 
 
@@ -342,17 +391,24 @@ def tier_of(score):
 # 4 — Tekrar önleme: son 7 günün digest'lerindeki URL'leri topla
 # --------------------------------------------------------------------------
 def load_recent_urls(days=7):
-    urls = set()
+    """Son N günün digest'lerinde geçen URL'leri + arXiv base-id'lerini döner
+    (versiyon numarası değişse bile aynı paper tekrar tam kart olarak girmesin)."""
+    keys = set()
     today = datetime.date.today()
     if not os.path.isdir(DIGESTS_DIR):
-        return urls
+        return keys
     for i in range(1, days + 1):
         d = today - datetime.timedelta(days=i)
         path = os.path.join(DIGESTS_DIR, f"radar-{d}.md")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
-                urls.update(re.findall(r"https?://\S+", f.read()))
-    return urls
+                content = f.read()
+            found = re.findall(r"https?://\S+", content)
+            keys.update(found)
+            for u in found:
+                if "arxiv.org" in u:
+                    keys.add(base_arxiv_id(u))
+    return keys
 
 
 # --------------------------------------------------------------------------
@@ -374,6 +430,7 @@ def render_paper_card(item):
     tur = "Paper+Resmi Kod" if (code and code.get("official")) else ("Paper+3.Taraf Kod" if code else "Sadece Paper")
     ozet = summary_snippet(p["summary"])
     kurum_satiri = f"**Kurumsal sinyal:** {', '.join(affiliations)}\n" if affiliations else ""
+    guncelleme_etiketi = " *(v-güncelleme — daha önce raporlanmış paper'ın yeni versiyonu)*" if p.get("is_update") else ""
     pnl_satiri = (
         "İddia edilen sonuç: metinde somut Sharpe/PnL/getiri iddiası tespit edildi — "
         "**doğrulanmamış, kaynağı paper içinde kontrol et.**\n"
@@ -381,7 +438,7 @@ def render_paper_card(item):
         "İddia edilen sonuç: [KAYNAK YOK] (metinde somut performans sayısı bulunamadı).\n"
     )
     return (
-        f"### [Skor {score} · {t}] {p['title']}\n"
+        f"### [Skor {score} · {t}] {p['title']}{guncelleme_etiketi}\n"
         f"**Tür:** {tur} · **Paper:** {p['url']} · **Kod:** {kod_str}\n"
         f"{kurum_satiri}"
         f"{ozet} {pnl_satiri}"
@@ -507,7 +564,9 @@ def main():
 
     papers_scored = []
     for p in papers:
-        if p["url"] in recent_urls:
+        # Daha önce raporlanmış (aynı base arXiv id) ve bu kez de "yeni" değilse atla.
+        # is_update=True olanlar (v2/v3 revizyonu) bilinçli olarak tekrar girer, kart üzerinde etiketlenir.
+        if not p.get("is_update") and (p["url"] in recent_urls or p["base_id"] in recent_urls):
             continue
         code = find_code_for_paper(p)
         fulltext = fetch_arxiv_fulltext(p["url"])
