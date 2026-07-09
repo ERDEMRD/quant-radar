@@ -77,16 +77,28 @@ PNL_PATTERNS = [
 
 
 # --------------------------------------------------------------------------
-# HTTP yardımcıları
+# HTTP yardımcıları — Kafka tarzı: geçici hatada düşürme, tekrar dene; sadece
+# gerçekten tükenince (retries bitince) çağıran tarafa boş/hata bırak, script çökmesin.
 # --------------------------------------------------------------------------
-def http_get(url, headers=None, timeout=20):
-    req = urllib.request.Request(url, headers={**UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", errors="ignore")
+def http_get(url, headers=None, timeout=20, retries=3, backoff=3):
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={**UA, **(headers or {})})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", errors="ignore")
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                wait = backoff * attempt
+                print(f"[http] {url[:80]}... deneme {attempt}/{retries} başarısız ({e}), {wait}sn sonra tekrar", file=sys.stderr)
+                time.sleep(wait)
+    raise last_exc
 
 
-def http_get_json(url, headers=None, timeout=20):
-    return json.loads(http_get(url, headers, timeout))
+def http_get_json(url, headers=None, timeout=20, retries=3, backoff=3):
+    raw = http_get(url, headers, timeout, retries, backoff)
+    return json.loads(raw)
 
 
 def gh_headers():
@@ -127,27 +139,38 @@ def _parse_arxiv_entries(root, ns, cat):
     return out
 
 
-def _fetch_arxiv_feed(cat, sort_by, max_results):
+def _fetch_arxiv_feed(cat, sort_by, max_results, parse_retries=3):
     """arXiv Atom feed'ini çek + parse et. Ağ/format hatalarında ASLA exception fırlatmaz — boş liste döner.
-    arXiv API'si art arda hızlı isteklerde bozuk/HTML hata sayfası dönebiliyor; bu yüzden
-    hem http_get hem de ET.fromstring ayrı ayrı korunuyor."""
+    arXiv API'si art arda hızlı isteklerde bozuk/HTML hata sayfası dönebiliyor (200 OK ama XML değil);
+    bu durumda http_get'in kendi retry'ı işe yaramaz (istek "başarılı" sayılır), o yüzden burada
+    parse hatasında da tüm isteği ayrıca tekrar deniyoruz — kaynak sessizce boş dönmesin, gerçekten
+    tükenmeden pes etmesin."""
     url = (f"http://export.arxiv.org/api/query?search_query=cat:{cat}"
            f"&sortBy={sort_by}&sortOrder=descending&max_results={max_results}")
-    try:
-        raw = http_get(url, timeout=25)
-    except Exception as e:
-        print(f"[arXiv] {cat} ({sort_by}) istek hatası: {e}", file=sys.stderr)
-        return []
-    try:
-        root = ET.fromstring(raw)
-    except ET.ParseError as e:
-        print(f"[arXiv] {cat} ({sort_by}) XML parse hatası (muhtemelen arXiv geçici hata sayfası döndü): {e}", file=sys.stderr)
-        return []
-    try:
-        return _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
-    except Exception as e:
-        print(f"[arXiv] {cat} ({sort_by}) entry parse hatası: {e}", file=sys.stderr)
-        return []
+    for attempt in range(1, parse_retries + 1):
+        try:
+            raw = http_get(url, timeout=25)
+        except Exception as e:
+            print(f"[arXiv] {cat} ({sort_by}) istek hatası (deneme {attempt}/{parse_retries}): {e}", file=sys.stderr)
+            if attempt < parse_retries:
+                time.sleep(4 * attempt)
+                continue
+            return []
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            print(f"[arXiv] {cat} ({sort_by}) XML parse hatası — arXiv geçici hata sayfası döndürmüş olabilir "
+                  f"(deneme {attempt}/{parse_retries}): {e}", file=sys.stderr)
+            if attempt < parse_retries:
+                time.sleep(4 * attempt)
+                continue
+            return []
+        try:
+            return _parse_arxiv_entries(root, {"a": "http://www.w3.org/2005/Atom"}, cat)
+        except Exception as e:
+            print(f"[arXiv] {cat} ({sort_by}) entry parse hatası: {e}", file=sys.stderr)
+            return []
+    return []
 
 
 def fetch_arxiv_category(cat, target_date, max_results=150):
