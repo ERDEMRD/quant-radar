@@ -1,26 +1,26 @@
-# quant-radar
+# quant-radar (v2 — yerel mod)
 
-Her sabah 07:00'de çalışan otonom quant araştırma radarı. Dünün arXiv/SSRN paper'larını,
-yeni GitHub repolarını ve topluluk sinyallerini tarar; paper+kod kombinasyonu ve PnL kanıtı
-öncelikli **RADAR skoru** ile ranklar; digest'i mail atar, en iyi bulguları Obsidian
-vault'una not düşer.
+Her sabah 07:00'de Cowork zamanlanmış görevi (`quant-radar-daily`) çalışır:
+dünün arXiv/SSRN paper'larını, yeni GitHub repolarını ve topluluk sinyallerini
+düşük token bütçesiyle (≤14 web çağrısı) tarar, **RADAR skoru** ile ranklar ve:
 
-- Protokol: [PROTOCOL.md](PROTOCOL.md)
-- Digest arşivi: [digests/](digests/)
-- Mail: `.github/workflows/mail-digest.yml` — `digests/` push'unda tetiklenir.
+- Digest → `digests/radar-YYYY-MM-DD.md` (ranklı, limitsiz liste)
+- Top ≤3 bulgu → `PAPERS/papers/Radar/` (Obsidian formatında, gerçek hub/tag eşleşmeli)
+- Index → `PAPERS/papers/Radar.md`
 
-## Kurulum (bir kez)
+**Mail ve GitHub push devre dışı** — her şey yerel klasöre yazılır.
+Kurulum gerekmez; uygulama açıkken görev kendiliğinden koşar (kapalıysa ilk açılışta).
 
-1. GitHub'da boş `quant-radar` reposu aç.
-2. Repo Settings → Secrets and variables → Actions, üç secret ekle:
-   - `MAIL_USERNAME` — Gmail adresin
-   - `MAIL_APP_PASSWORD` — Gmail uygulama şifresi
-   - `MAIL_TO` — alıcı adres (boş bırakılabilir, o zaman MAIL_USERNAME'e gider)
-3. GitHub'dan `repo` yetkili bir Personal Access Token üret ve bu klasördeki
-   `config/github_token.txt` dosyasına yapıştır (dosya .gitignore'da, asla push edilmez).
-4. `config/config.json` içindeki `remote` alanına repo adresini yaz.
-5. İlk push'u yap (ya da Cowork'te "quant-radar'ı push et" de).
+Protokol (kanonik): [PROTOCOL.md](PROTOCOL.md)
 
-Zamanlanmış görev her sabah: tarar → skorlar → `digests/radar-YYYY-MM-DD.md` yazar →
-commit+push → Action maili gönderir → top bulgular `PAPERS/papers/Radar/`e Obsidian
-notu olarak düşer.
+## Opsiyonel: mail'i sonradan açmak
+
+`.github/workflows/` ve `scripts/` klasörleri duruyor — istenirse repo GitHub'a
+push edilip secrets (`MAIL_USERNAME`, `MAIL_APP_PASSWORD`, `MAIL_TO`) eklenerek
+digest'lerin mail olarak gitmesi tekrar aktifleştirilebilir. Şu an kullanılmıyor.
+
+## Paylaşım
+
+Sistemi başkasına vermek için `quant-radar` klasörünü zip'leyip göndermek yeterli;
+alan kişi Cowork'te klasörü seçip "PROTOCOL.md'ye göre her sabah 07:00'de çalışan
+scheduled task kur" der — sistem aynen kurulur.

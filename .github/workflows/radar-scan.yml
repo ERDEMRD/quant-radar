@@ -1,0 +1,41 @@
+name: Quant Radar daily scan
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # Her gün 04:00 UTC (07:00 TR saati)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # asılı kalma sigortası — takılırsa runner'ı sonsuza dek meşgul etmesin
+    env:
+      PYTHONUNBUFFERED: "1"  # loglar anlık aksın, tarama 'donmuş' gibi görünmesin
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Radar taramasını çalıştır
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/fetch_radar.py
+
+      - name: Digest'i commit + push et
+        run: |
+          git config user.name "quant-radar-bot"
+          git config user.email "${{ secrets.MAIL_USERNAME }}"
+          git add digests/
+          if git diff --cached --quiet; then
+            echo "Yeni digest yok, commit atlanıyor."
+            exit 0
+          fi
+          git commit -m "radar: $(date -u +%F) günlük tarama"
+          git push
