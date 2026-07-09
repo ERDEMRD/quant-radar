@@ -1,0 +1,6 @@
+{
+  "remote": "https://github.com/KULLANICI_ADIN/quant-radar.git",
+  "token_file": "config/github_token.txt",
+  "git_user": "quant-radar-bot",
+  "git_email": "yalandangpt4.0@gmail.com"
+}
