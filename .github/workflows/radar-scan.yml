@@ -2,7 +2,7 @@ name: Quant Radar daily scan
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # Her gün 04:00 UTC (07:00 TR saati)
+    - cron: '0 3 * * *'  # Her gün 03:00 UTC (06:00 TR sabit, TR yaz saati uygulamiyor)
   workflow_dispatch: {}
 
 permissions:
