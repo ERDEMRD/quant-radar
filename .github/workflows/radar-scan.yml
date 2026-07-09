@@ -1,41 +1,76 @@
 name: Quant Radar daily scan
 
+# Dayanıklı tasarım: tarama + mail TEK job'da (tek runner yeter, iki ayrı workflow'un
+# ikisinin de runner bulması gerekmez). GitHub runner arızalarına karşı 2 yedek cron;
+# "zaten gönderildi" koruması sayesinde yedekler çift mail ATMAZ — sadece ilk deneme
+# başarısız olduysa devreye girer.
 on:
   schedule:
-    - cron: '0 3 * * *'  # Her gün 03:00 UTC (06:00 TR sabit, TR yaz saati uygulamiyor)
+    - cron: '0 3 * * *'   # 06:00 TR — ana çalıştırma
+    - cron: '45 3 * * *'  # 06:45 TR — yedek 1 (ana deneme runner bulamazsa/düşerse)
+    - cron: '30 4 * * *'  # 07:30 TR — yedek 2
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
+concurrency:
+  group: quant-radar-scan
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # asılı kalma sigortası — takılırsa runner'ı sonsuza dek meşgul etmesin
+    timeout-minutes: 30  # asılı kalma sigortası
     env:
-      PYTHONUNBUFFERED: "1"  # loglar anlık aksın, tarama 'donmuş' gibi görünmesin
+      PYTHONUNBUFFERED: "1"  # loglar anlık aksın
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Bugün zaten gönderilmiş mi? (yedek çalıştırma koruması)
+        id: guard
+        run: |
+          TARGET=$(date -u -d "yesterday" +%F)
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          if [ "$(cat digests/.last-mailed 2>/dev/null)" = "$TARGET" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Digest $TARGET zaten taranıp mail'lenmiş — bu (yedek) çalıştırma atlanıyor."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Radar taramasını çalıştır
+        if: steps.guard.outputs.skip == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 scripts/fetch_radar.py
 
-      - name: Digest'i commit + push et
+      - name: Digest'i mail'le
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python3 scripts/send_digest.py "digests/radar-${{ steps.guard.outputs.target }}.md"
+
+      - name: Digest + gönderim işaretini commit'le
+        if: steps.guard.outputs.skip == 'false'
         run: |
+          echo "${{ steps.guard.outputs.target }}" > digests/.last-mailed
           git config user.name "quant-radar-bot"
-          git config user.email "${{ secrets.MAIL_USERNAME }}"
+          git config user.email "quant-radar-bot@users.noreply.github.com"
           git add digests/
           if git diff --cached --quiet; then
-            echo "Yeni digest yok, commit atlanıyor."
+            echo "Değişiklik yok, commit atlanıyor."
             exit 0
           fi
-          git commit -m "radar: $(date -u +%F) günlük tarama"
+          git commit -m "radar: ${{ steps.guard.outputs.target }} günlük tarama + mail gönderildi"
+          git pull --rebase origin main || true
           git push
