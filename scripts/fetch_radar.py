@@ -773,8 +773,8 @@ def render_digest_html(target_date, papers_scored, repos_scored, hn, reddit_q, r
 <body style="margin:0;padding:24px 12px;background:#F4F6F9;font-family:-apple-system,Helvetica,Arial,sans-serif;">
   <div style="max-width:680px;margin:0 auto;background:#FFFFFF;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(11,31,58,0.08);">
     <div style="background:#0B1F3A;padding:28px 32px;">
-      <h1 style="color:#FFFFFF;margin:0;font-size:22px;font-family:Georgia,serif;">🔭 Quant Radar</h1>
-      <p style="color:#9FB0C8;margin:6px 0 0;font-size:13px;">{target_date} · Günlük Kod-Tabanlı Tarama</p>
+      <h1 style="color:#FFFFFF;margin:0;font-size:23px;font-family:Georgia,serif;letter-spacing:0.2px;">🔭 Quant Radar — {target_date}</h1>
+      <p style="color:#9FB0C8;margin:6px 0 0;font-size:12px;letter-spacing:0.5px;text-transform:uppercase;">Günlük Kod-Tabanlı Tarama</p>
     </div>
     <div style="padding:20px 32px;border-bottom:1px solid #E2E5EA;">
       <p style="font-size:13px;color:#3A4250;line-height:1.6;margin:0;">{summary_paragraph}</p>
